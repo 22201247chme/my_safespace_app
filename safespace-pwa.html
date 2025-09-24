@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SafeSpace PNG</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, addDoc, onSnapshot, orderBy, doc, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, auth, db, userId = null;
+        let unsubscribeJournal = null;
+
+        // Message Modal elements
+        const messageModal = document.getElementById('message-modal');
+        const messageText = document.getElementById('message-text');
+
+        function showMessage(text) {
+            messageText.textContent = text;
+            messageModal.style.display = 'flex';
+        }
+
+        function hideMessage() {
+            messageModal.style.display = 'none';
+        }
+
+        // Journal elements
+        const journalScreen = document.getElementById('journal-screen');
+        const journalPasswordScreen = document.getElementById('journal-password-screen');
+        const journalContent = document.getElementById('journal-content');
+        const passwordSetup = document.getElementById('password-setup');
+        const passwordLogin = document.getElementById('password-login');
+        const journalEntriesList = document.getElementById('journal-entries-list');
+        const userIdDisplay = document.getElementById('user-id-display');
+
+        async function initFirebase() {
+            try {
+                setLogLevel('debug'); // Enable Firestore debug logging
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Check for the initial auth token provided by the canvas environment
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Listen for auth state changes and update UI
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated:", userId);
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        // Now we can show the main app and set up listeners
+                        showPage('home-screen');
+                    } else {
+                        console.log("User signed out.");
+                        userId = null;
+                    }
+                });
+            } catch (e) {
+                console.error("Firebase initialization error:", e);
+                showMessage("Failed to connect to the database. Please try again later.");
+            }
+        }
+
+        // Functions for Firestore operations
+        async function saveJournalEntry(text, password) {
+            if (!userId) {
+                showMessage("Please sign in to save journal entries.");
+                return;
+            }
+            try {
+                const encryptedText = encryptEntry(text, password);
+                const journalCollectionPath = `artifacts/${appId}/users/${userId}/journals`;
+                const docRef = await addDoc(collection(db, journalCollectionPath), {
+                    content: encryptedText,
+                    date: new Date().toISOString(),
+                });
+                console.log("Journal entry saved with ID: ", docRef.id);
+                showMessage('Journal entry saved successfully!');
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage("Error saving entry. Please try again.");
+            }
+        }
+
+        function loadJournalEntries() {
+            if (unsubscribeJournal) {
+                unsubscribeJournal();
+            }
+            if (!userId) {
+                showMessage("Authentication required to load journals.");
+                return;
+            }
+            try {
+                const journalCollectionPath = `artifacts/${appId}/users/${userId}/journals`;
+                const q = query(collection(db, journalCollectionPath));
+                
+                unsubscribeJournal = onSnapshot(q, (querySnapshot) => {
+                    journalEntriesList.innerHTML = '';
+                    const entries = [];
+                    querySnapshot.forEach((doc) => {
+                        entries.push({ id: doc.id, ...doc.data() });
+                    });
+
+                    // Sort the entries by date in descending order
+                    entries.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+                    entries.forEach(entry => {
+                        const entryElement = document.createElement('div');
+                        entryElement.className = 'journal-entry';
+                        const decryptedContent = decryptEntry(entry.content, localStorage.getItem('currentJournalPassword'));
+                        const formattedDate = new Date(entry.date).toLocaleDateString('en-PG', { year: 'numeric', month: 'long', day: 'numeric' });
+                        
+                        entryElement.innerHTML = `
+                            <div class="flex-grow min-w-0">
+                                <p class="journal-text text-gray-800">${decryptedContent}</p>
+                                <p class="journal-date">${formattedDate}</p>
+                            </div>
+                            <div class="flex items-center space-x-2">
+                                <button class="view-btn" data-id="${entry.id}">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
+                                        <path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd" />
+                                    </svg>
+                                </button>
+                                <button class="delete-btn" data-id="${entry.id}">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                    </svg>
+                                </button>
+                            </div>
+                        `;
+                        journalEntriesList.appendChild(entryElement);
+                    });
+                    
+                    document.querySelectorAll('.view-btn').forEach(btn => {
+                        btn.addEventListener('click', (e) => showJournalEntry(e.currentTarget.dataset.id));
+                    });
+                    document.querySelectorAll('.delete-btn').forEach(btn => {
+                        btn.addEventListener('click', (e) => deleteJournalEntry(e.currentTarget.dataset.id));
+                    });
+                }, (error) => {
+                    console.error("Firestore error: ", error);
+                    showMessage("Error fetching journal entries. Please check your internet connection.");
+                });
+            } catch (e) {
+                console.error("Failed to set up Firestore listener: ", e);
+                showMessage("Error loading journal entries. Please try again.");
+            }
+        }
+
+        async function showJournalEntry(docId) {
+            if (!userId) return;
+            try {
+                const journalCollectionPath = `artifacts/${appId}/users/${userId}/journals`;
+                const docRef = doc(db, journalCollectionPath, docId);
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const decryptedText = decryptEntry(data.content, localStorage.getItem('currentJournalPassword'));
+                    modalText.textContent = decryptedText;
+                    journalModal.style.display = 'flex';
+                    copyBtn.dataset.text = decryptedText;
+                } else {
+                    showMessage("Entry not found.");
+                }
+            } catch (e) {
+                console.error("Error fetching document: ", e);
+                showMessage("Failed to retrieve entry.");
+            }
+        }
+
+        async function deleteJournalEntry(docId) {
+            if (!userId) return;
+            try {
+                const journalCollectionPath = `artifacts/${appId}/users/${userId}/journals`;
+                await deleteDoc(doc(db, journalCollectionPath, docId));
+                showMessage("Entry deleted successfully!");
+            } catch (e) {
+                console.error("Error removing document: ", e);
+                showMessage("Error deleting entry. Please try again.");
+            }
+        }
+
+        // Attach global functions to window for use in HTML
+        window.showMessage = showMessage;
+        window.hideMessage = hideMessage;
+        window.showPage = showPage;
+        window.loadJournalEntries = loadJournalEntries;
+        window.saveJournalEntry = saveJournalEntry;
+        window.showJournalEntry = showJournalEntry;
+        window.deleteJournalEntry = deleteJournalEntry;
+        window.initFirebase = initFirebase;
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        .app-container {
+            max-width: 420px;
+            margin: auto;
+            min-height: 100vh;
+            background-color: #ffffff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+        /* Splash Screen */
+        #splash-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-color: #1a56db;
+            color: white;
+            z-index: 100;
+            transition: opacity 1s ease-in-out;
+            opacity: 1;
+        }
+        #splash-screen.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+        .logo {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background-color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .logo-text {
+            color: #1a56db;
+            font-size: 2.5rem;
+            font-weight: bold;
+        }
+        .loading-bar {
+            width: 150px;
+            height: 4px;
+            background-color: rgba(255, 255, 255, 0.5);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 1rem;
+        }
+        .loading-bar-fill {
+            height: 100%;
+            background-color: white;
+            animation: fill 2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+        @keyframes fill {
+            0% { width: 0; }
+            100% { width: 100%; }
+        }
+        
+        /* Main App Screens */
+        #main-app {
+            display: none; /* Hidden by default */
+            flex-grow: 1;
+        }
+        header {
+            background-color: #1a56db;
+            color: white;
+            padding: 1.5rem 1rem;
+            border-bottom-left-radius: 20px;
+            border-bottom-right-radius: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .page-content {
+            padding: 1rem;
+            flex-grow: 1;
+            overflow-y: auto;
+        }
+        .page {
+            display: none;
+        }
+        .page.active {
+            display: block;
+        }
+        .card {
+            background-color: #f8fafc;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e2e8f0;
+            margin-bottom: 1rem;
+        }
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: #1e293b;
+        }
+        .nav-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .nav-btn {
+            background-color: #e0f2fe;
+            color: #0c4a6e;
+            padding: 1.5rem;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            font-weight: 600;
+            transition: background-color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        .nav-btn:hover {
+            background-color: #d0e8fc;
+        }
+        .nav-btn:active {
+            transform: scale(0.98);
+        }
+        .nav-btn-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        .footer-nav {
+            display: flex;
+            justify-content: space-around;
+            background-color: #ffffff;
+            padding: 0.75rem 0;
+            border-top: 1px solid #e2e8f0;
+            position: sticky;
+            bottom: 0;
+            width: 100%;
+            z-index: 10;
+        }
+        .footer-nav-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-size: 0.75rem;
+            color: #64748b;
+            cursor: pointer;
+            transition: color 0.2s ease-in-out;
+        }
+        .footer-nav-btn.active {
+            color: #1e3a8a;
+        }
+        .footer-nav-btn .icon {
+            font-size: 1.5rem;
+            margin-bottom: 0.25rem;
+        }
+        .journal-entry {
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            padding: 1rem;
+            border-radius: 12px;
+            margin-bottom: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .journal-text {
+            flex-grow: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .journal-date {
+            font-size: 0.75rem;
+            color: #64748b;
+        }
+        .journal-actions button {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0.25rem;
+            color: #4a4a4a;
+        }
+        .journal-actions button:hover {
+            color: #1a56db;
+        }
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            padding: 1rem;
+        }
+        .modal-content {
+            background-color: #ffffff;
+            padding: 1.5rem;
+            border-radius: 12px;
+            max-width: 90%;
+            max-height: 80%;
+            display: flex;
+            flex-direction: column;
+            text-align: center;
+        }
+        .modal-text {
+            text-align: left;
+            margin-bottom: 1rem;
+            white-space: pre-wrap;
+            overflow-y: auto;
+            flex-grow: 1;
+            padding-right: 0.5rem;
+            line-height: 1.5;
+        }
+        .quiz-question {
+            margin-bottom: 1rem;
+        }
+        .quiz-options button {
+            width: 100%;
+            text-align: left;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            border-radius: 8px;
+            background-color: #f1f5f9;
+            transition: background-color 0.2s ease;
+        }
+        .quiz-options button.correct {
+            background-color: #dcfce7;
+            border: 2px solid #22c55e;
+        }
+        .quiz-options button.incorrect {
+            background-color: #fee2e2;
+            border: 2px solid #ef4444;
+        }
+        .quiz-result {
+            text-align: center;
+            margin-top: 1.5rem;
+        }
+        .list-item {
+            padding: 1rem;
+            background-color: #f8fafc;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            border: 1px solid #e2e8f0;
+        }
+        .list-item-title {
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body class="bg-gray-100" onload="initFirebase()">
+
+    <!-- Splash Screen -->
+    <div id="splash-screen">
+        <div class="logo">
+            <span class="logo-text">PNG</span>
+        </div>
+        <h1 class="text-4xl font-bold">SafeSpace</h1>
+        <p class="text-lg mt-2 opacity-80">Your voice matters, your safety is paramount.</p>
+        <div class="loading-bar">
+            <div class="loading-bar-fill"></div>
+        </div>
+    </div>
+
+    <!-- Main Application -->
+    <div id="main-app" class="app-container">
+        <!-- Header -->
+        <header>
+            <h1 id="header-title" class="text-2xl font-bold text-center">Home</h1>
+            <p id="user-id-display" class="text-sm text-center mt-2 opacity-70"></p>
+        </header>
+
+        <!-- Page Content -->
+        <main class="page-content">
+            <!-- Home Screen -->
+            <div id="home-screen" class="page active">
+                <div class="card bg-blue-50 border-blue-200">
+                    <h2 class="text-xl font-semibold mb-2 text-blue-800">Welcome to SafeSpace</h2>
+                    <p class="text-blue-700">A mobile resource for gender awareness and support in Papua New Guinea.</p>
+                </div>
+                <div class="nav-grid">
+                    <button class="nav-btn" onclick="showPage('awareness-screen')">
+                        <span class="nav-btn-icon">💡</span>
+                        Awareness
+                    </button>
+                    <button class="nav-btn" onclick="showPage('safety-plan-screen')">
+                        <span class="nav-btn-icon">🛡️</span>
+                        My Safety Plan
+                    </button>
+                    <button class="nav-btn" onclick="showPage('resources-screen')">
+                        <span class="nav-btn-icon">🔗</span>
+                        Resources
+                    </button>
+                    <button class="nav-btn" onclick="showPage('emergency-screen')">
+                        <span class="nav-btn-icon">🚨</span>
+                        Emergency Help
+                    </button>
+                    <button class="nav-btn" onclick="showPage('journal-screen')">
+                        <span class="nav-btn-icon">✍️</span>
+                        Journal Entries
+                    </button>
+                    <button class="nav-btn" onclick="showPage('quiz-screen')">
+                        <span class="nav-btn-icon">🧠</span>
+                        Awareness Quiz
+                    </button>
+                </div>
+            </div>
+
+            <!-- Awareness Screen -->
+            <div id="awareness-screen" class="page">
+                <div class="card bg-purple-50 border-purple-200">
+                    <h2 class="card-title text-purple-800">Gender Equality Awareness</h2>
+                    <p class="text-gray-700">Gender equality is the principle that everyone should have equal rights, responsibilities, and opportunities, regardless of their gender. This does not mean that men and women are the same, but that their different experiences and needs are equally valued. Achieving gender equality is crucial for building a peaceful, prosperous, and sustainable Papua New Guinea.</p>
+                </div>
+            </div>
+            
+            <!-- My Safety Plan Screen -->
+            <div id="safety-plan-screen" class="page">
+                <div class="card bg-orange-50 border-orange-200">
+                    <h2 class="card-title text-orange-800">My Safety Plan</h2>
+                    <p class="text-gray-700 mb-4">This is your personal, private safety plan. Fill it out to prepare for emergencies. It is saved only on this device.</p>
+                    <form id="safety-plan-form" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Safe Person 1 Name</label>
+                            <input type="text" id="safe-person-1" class="w-full p-2 border rounded-lg">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Safe Person 1 Contact</label>
+                            <input type="tel" id="safe-contact-1" class="w-full p-2 border rounded-lg">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Safe Location</label>
+                            <input type="text" id="safe-location" class="w-full p-2 border rounded-lg">
+                        </div>
+                        <button type="submit" class="w-full bg-orange-600 text-white font-bold py-3 rounded-lg transition-transform transform active:scale-95">Save Plan</button>
+                    </form>
+                </div>
+                <div id="saved-plan-display" class="mt-4 hidden">
+                    <h3 class="card-title">Saved Plan</h3>
+                    <div class="card bg-orange-50 border-orange-200">
+                        <p class="text-gray-700"><span class="font-bold">Safe Person:</span> <span id="display-person-1"></span></p>
+                        <p class="text-gray-700"><span class="font-bold">Contact:</span> <span id="display-contact-1"></span></p>
+                        <p class="text-gray-700"><span class="font-bold">Safe Location:</span> <span id="display-location"></span></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resources Screen -->
+            <div id="resources-screen" class="page">
+                <div class="card bg-teal-50 border-teal-200">
+                    <h2 class="card-title text-teal-800">Support & Helplines</h2>
+                    <p class="text-gray-700 mb-4">A list of reliable contacts and organizations for assistance.</p>
+                    <div class="space-y-2">
+                        <div class="list-item">
+                            <h4 class="list-item-title text-teal-700">1-Tok Kaunselin Helpim Lain</h4>
+                            <p class="text-sm text-gray-600">Free, confidential telephone counseling.</p>
+                            <a href="tel:71508000" class="text-blue-600 text-sm font-medium">Call 7150 8000</a>
+                        </div>
+                        <div class="list-item">
+                            <h4 class="list-item-title text-teal-700">Femili PNG</h4>
+                            <p class="text-sm text-gray-600">Case management services for survivors of family and sexual violence.</p>
+                            <span class="text-sm text-gray-600">Contact: (555) 123-4567</span>
+                        </div>
+                        <div class="list-item">
+                            <h4 class="list-item-title text-teal-700">PNG Tribal Foundation</h4>
+                            <p class="text-sm text-gray-600">Works on gender equality education and empowerment.</p>
+                            <span class="text-sm text-gray-600">Contact: (555) 987-6543</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Emergency Help Screen -->
+            <div id="emergency-screen" class="page">
+                <div class="card bg-red-50 border-red-200">
+                    <h2 class="card-title text-red-800">Emergency Help</h2>
+                    <p class="text-gray-700">If you are in immediate danger, please reach out to these numbers. They are available to provide direct and urgent help.</p>
+                    <ul class="mt-4 space-y-3">
+                        <li>
+                            <a href="tel:71508000" class="flex items-center justify-between p-3 rounded-lg bg-red-100 text-red-800 font-medium">
+                                <span>1-Tok Kaunselin Helpim Lain</span>
+                                <span class="font-bold">7150 8000</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a href="tel:111" class="flex items-center justify-between p-3 rounded-lg bg-red-100 text-red-800 font-medium">
+                                <span>Police Emergency</span>
+                                <span class="font-bold">111</span>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Journal Screen -->
+            <div id="journal-screen" class="page">
+                <div id="journal-password-screen" class="flex flex-col items-center justify-center text-center h-full">
+                    <div id="password-setup" class="card space-y-4 w-full">
+                        <h2 class="text-xl font-bold">Set Your Journal Password</h2>
+                        <p class="text-sm text-gray-600">This password will secure your entries. Do not forget it, as it cannot be recovered.</p>
+                        <form id="password-setup-form" class="space-y-4">
+                            <input type="password" id="new-password" placeholder="Enter a new password" class="w-full p-3 rounded-lg border border-gray-300">
+                            <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg transition-transform transform active:scale-95">Set Password</button>
+                        </form>
+                    </div>
+                    <div id="password-login" class="card space-y-4 w-full hidden">
+                        <h2 class="text-xl font-bold">Enter Your Password</h2>
+                        <form id="password-login-form" class="space-y-4">
+                            <input type="password" id="journal-password" placeholder="Enter your password" class="w-full p-3 rounded-lg border border-gray-300">
+                            <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg transition-transform transform active:scale-95">Unlock Journal</button>
+                        </form>
+                        <p class="text-sm text-gray-500">
+                            Forgot your password? 
+                            <span id="reset-journal-btn" class="text-red-600 cursor-pointer underline">Reset Journal</span>
+                        </p>
+                    </div>
+                </div>
+
+                <div id="journal-content" class="h-full hidden">
+                    <div class="card bg-yellow-50 border-yellow-200">
+                        <h2 class="card-title text-yellow-800">My Journal</h2>
+                        <p class="text-gray-700">Your journal is synced to the cloud. Your data is private and secure.</p>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">New Entry</h3>
+                        <form id="journal-form" class="space-y-4">
+                            <textarea id="journal-text" rows="5" class="w-full p-3 rounded-lg border border-gray-300 focus:outline-none focus:border-blue-500" placeholder="Write your thoughts..."></textarea>
+                            <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg transition-transform transform active:scale-95">Save Entry</button>
+                        </form>
+                    </div>
+
+                    <div id="journal-entries-list" class="mt-4 space-y-3">
+                        <!-- Journal entries will be rendered here -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Quiz Screen -->
+            <div id="quiz-screen" class="page">
+                <div class="card bg-pink-50 border-pink-200">
+                    <h2 class="card-title text-pink-800">Awareness Quiz</h2>
+                    <p class="text-gray-700">Test your knowledge on gender equality!</p>
+                </div>
+                
+                <div class="card">
+                    <div id="quiz-container">
+                        <div id="quiz-question" class="quiz-question"></div>
+                        <div id="quiz-options" class="quiz-options space-y-2"></div>
+                        <div id="quiz-result" class="quiz-result hidden"></div>
+                        <button id="next-quiz-btn" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg mt-4 transition-transform transform active:scale-95 hidden">Next Question</button>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Footer Navigation -->
+        <nav class="footer-nav">
+            <button class="footer-nav-btn active" data-page="home-screen" data-title="Home">
+                <span class="icon">🏠</span>
+                Home
+            </button>
+            <button class="footer-nav-btn" data-page="safety-plan-screen" data-title="My Safety Plan">
+                <span class="icon">🛡️</span>
+                Safety
+            </button>
+            <button class="footer-nav-btn" data-page="resources-screen" data-title="Resources">
+                <span class="icon">🔗</span>
+                Resources
+            </button>
+            <button class="footer-nav-btn" data-page="journal-screen" data-title="Journal">
+                <span class="icon">✍️</span>
+                Journal
+            </button>
+            <button class="footer-nav-btn" data-page="quiz-screen" data-title="Quiz">
+                <span class="icon">🧠</span>
+                Quiz
+            </button>
+        </nav>
+    </div>
+
+    <!-- Modal for Journal View/Share -->
+    <div id="journal-modal" class="modal">
+        <div class="modal-content">
+            <h3 class="font-bold text-xl mb-2">Journal Entry</h3>
+            <p id="modal-text" class="modal-text"></p>
+            <div class="flex justify-center gap-4 mt-4">
+                <button id="copy-btn" class="bg-green-600 text-white font-bold py-2 px-6 rounded-lg transition-transform transform active:scale-95">Copy</button>
+                <button id="close-modal-btn" class="bg-gray-400 text-white font-bold py-2 px-6 rounded-lg transition-transform transform active:scale-95">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for general messages -->
+    <div id="message-modal" class="modal">
+        <div class="modal-content">
+            <h3 class="text-lg font-bold mb-2 text-gray-800">Message</h3>
+            <p id="message-text" class="text-sm text-gray-600 mb-4"></p>
+            <button class="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg transition-transform transform active:scale-95" onclick="hideMessage()">OK</button>
+        </div>
+    </div>
+
+    <script>
+        // Start of application logic
+        const SPLASH_DURATION = 2000;
+
+        // Journal encryption key
+        let JOURNAL_PASSWORD = null;
+
+        const splashScreen = document.getElementById('splash-screen');
+        const mainApp = document.getElementById('main-app');
+        const headerTitle = document.getElementById('header-title');
+        const pages = document.querySelectorAll('.page');
+        const footerNavBtns = document.querySelectorAll('.footer-nav-btn');
+
+        // Journal elements
+        const journalPasswordScreen = document.getElementById('journal-password-screen');
+        const journalContent = document.getElementById('journal-content');
+        const passwordSetup = document.getElementById('password-setup');
+        const passwordLogin = document.getElementById('password-login');
+        const newPasswordInput = document.getElementById('new-password');
+        const journalPasswordInput = document.getElementById('journal-password');
+        const passwordSetupForm = document.getElementById('password-setup-form');
+        const passwordLoginForm = document.getElementById('password-login-form');
+        const journalForm = document.getElementById('journal-form');
+        const journalTextarea = document.getElementById('journal-text');
+        const journalEntriesList = document.getElementById('journal-entries-list');
+        const resetJournalBtn = document.getElementById('reset-journal-btn');
+
+        // Modals
+        const journalModal = document.getElementById('journal-modal');
+        const modalText = document.getElementById('modal-text');
+        const copyBtn = document.getElementById('copy-btn');
+        const closeModalBtn = document.getElementById('close-modal-btn');
+        const messageModal = document.getElementById('message-modal');
+        const messageText = document.getElementById('message-text');
+
+        // Quiz elements
+        const quizQuestions = [
+            { question: "What does gender equality mean?", options: ["Men and women are the same.", "Everyone has equal rights and opportunities.", "Women are more powerful than men.", "Only men should be in leadership roles."], answer: "Everyone has equal rights and opportunities." },
+            { question: "Which of these is a form of gender-based violence?", options: ["Giving a compliment.", "Verbal abuse.", "Providing care for a family member.", "Working outside the home."], answer: "Verbal abuse." },
+            { question: "Who benefits from gender equality?", options: ["Only women.", "Only men.", "No one.", "Everyone in society."], answer: "Everyone in society." },
+        ];
+        let currentQuizIndex = 0;
+        const quizQuestionEl = document.getElementById('quiz-question');
+        const quizOptionsEl = document.getElementById('quiz-options');
+        const quizResultEl = document.getElementById('quiz-result');
+        const nextQuizBtn = document.getElementById('next-quiz-btn');
+
+        // Safety Plan elements
+        const safetyPlanForm = document.getElementById('safety-plan-form');
+        const safePerson1Input = document.getElementById('safe-person-1');
+        const safeContact1Input = document.getElementById('safe-contact-1');
+        const safeLocationInput = document.getElementById('safe-location');
+        const savedPlanDisplay = document.getElementById('saved-plan-display');
+        const displayPerson1 = document.getElementById('display-person-1');
+        const displayContact1 = document.getElementById('display-contact-1');
+        const displayLocation = document.getElementById('display-location');
+
+        // Initial splash screen and app load
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                splashScreen.classList.add('fade-out');
+                setTimeout(() => {
+                    splashScreen.style.display = 'none';
+                    // We now show the main app after Firebase auth is ready
+                }, 1000);
+            }, SPLASH_DURATION);
+        });
+
+        // The showPage function is now part of the global scope
+        function showPage(pageId) {
+            pages.forEach(page => page.classList.remove('active'));
+            document.getElementById(pageId).classList.add('active');
+
+            const activeBtn = document.querySelector(`.footer-nav-btn[data-page="${pageId}"]`);
+            footerNavBtns.forEach(btn => btn.classList.remove('active'));
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+                headerTitle.textContent = activeBtn.dataset.title;
+            }
+
+            // Journal page has special password logic
+            if (pageId === 'journal-screen') {
+                checkJournalPassword();
+            } else if (pageId === 'safety-plan-screen') {
+                loadSafetyPlan();
+            } else if (pageId === 'quiz-screen') {
+                startQuiz();
+            }
+        }
+
+        // --- Journal Password & Functionality ---
+        function hashPassword(password) {
+            return CryptoJS.SHA256(password).toString();
+        }
+
+        // This function checks if a password has been set for the journal
+        function checkJournalPassword() {
+            const storedHash = localStorage.getItem('journalPasswordHash');
+            if (storedHash) {
+                passwordSetup.classList.add('hidden');
+                passwordLogin.classList.remove('hidden');
+                journalContent.classList.add('hidden');
+                journalPasswordScreen.classList.remove('hidden');
+            } else {
+                passwordSetup.classList.remove('hidden');
+                passwordLogin.classList.add('hidden');
+                journalContent.classList.add('hidden');
+                journalPasswordScreen.classList.remove('hidden');
+            }
+        }
+
+        // Sets the journal password and stores a hash of it locally
+        function setJournalPassword(event) {
+            event.preventDefault();
+            const password = newPasswordInput.value;
+            if (password.length < 4) {
+                showMessage("Password must be at least 4 characters.");
+                return;
+            }
+            const hash = hashPassword(password);
+            localStorage.setItem('journalPasswordHash', hash);
+            localStorage.setItem('currentJournalPassword', password); // Temporary storage for session
+            newPasswordInput.value = '';
+            journalPasswordScreen.classList.add('hidden');
+            journalContent.classList.remove('hidden');
+            loadJournalEntries();
+            showMessage("Password set! Your journal is now protected.");
+        }
+
+        // Unlocks the journal if the provided password matches the stored hash
+        function unlockJournal(event) {
+            event.preventDefault();
+            const password = journalPasswordInput.value;
+            const storedHash = localStorage.getItem('journalPasswordHash');
+            if (hashPassword(password) === storedHash) {
+                localStorage.setItem('currentJournalPassword', password); // Save for the session
+                journalPasswordInput.value = '';
+                journalPasswordScreen.classList.add('hidden');
+                journalContent.classList.remove('hidden');
+                loadJournalEntries();
+                showMessage("Journal unlocked!");
+            } else {
+                showMessage("Incorrect password. Please try again.");
+            }
+        }
+
+        // Encrypts text using the user's password
+        function encryptEntry(text, password) {
+            return CryptoJS.AES.encrypt(text, password).toString();
+        }
+
+        // Decrypts text using the user's password
+        function decryptEntry(encryptedText, password) {
+            try {
+                const bytes = CryptoJS.AES.decrypt(encryptedText, password);
+                return bytes.toString(CryptoJS.enc.Utf8);
+            } catch (e) {
+                return "Error: Could not decrypt this entry. Wrong password?";
+            }
+        }
+
+        passwordSetupForm.addEventListener('submit', setJournalPassword);
+        passwordLoginForm.addEventListener('submit', unlockJournal);
+
+        resetJournalBtn.addEventListener('click', () => {
+            // Using a custom modal for confirmation instead of window.confirm
+            const confirmMessage = "WARNING: This will permanently delete all your journal entries and your password. This action cannot be undone. Are you sure you want to proceed?";
+            showMessage(confirmMessage);
+            const okBtn = messageModal.querySelector('button');
+            const newOkBtn = okBtn.cloneNode(true);
+            okBtn.replaceWith(newOkBtn);
+            newOkBtn.textContent = 'Yes, Reset';
+            newOkBtn.onclick = () => {
+                // Clear local storage and Firestore data
+                localStorage.removeItem('journalPasswordHash');
+                localStorage.removeItem('currentJournalPassword');
+                const journalCollectionPath = `artifacts/${appId}/users/${userId}/journals`;
+                getDocs(collection(db, journalCollectionPath)).then(snapshot => {
+                    snapshot.forEach(doc => deleteDoc(doc.ref));
+                    showMessage("Journal has been reset. You can now set a new password.");
+                    checkJournalPassword();
+                });
+                hideMessage();
+            };
+        });
+
+        journalForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = journalTextarea.value.trim();
+            const password = localStorage.getItem('currentJournalPassword');
+            if (text && password) {
+                saveJournalEntry(text, password);
+                journalTextarea.value = '';
+            } else {
+                showMessage("Please unlock the journal first to save an entry.");
+            }
+        });
+
+        // --- Safety Plan Functionality (still uses localStorage) ---
+        function saveSafetyPlan(event) {
+            event.preventDefault();
+            const plan = {
+                person: safePerson1Input.value,
+                contact: safeContact1Input.value,
+                location: safeLocationInput.value
+            };
+            localStorage.setItem('safetyPlan', JSON.stringify(plan));
+            loadSafetyPlan();
+            showMessage('Safety plan saved!');
+        }
+
+        function loadSafetyPlan() {
+            const plan = JSON.parse(localStorage.getItem('safetyPlan'));
+            if (plan && (plan.person || plan.contact || plan.location)) {
+                displayPerson1.textContent = plan.person || 'N/A';
+                displayContact1.textContent = plan.contact || 'N/A';
+                displayLocation.textContent = plan.location || 'N/A';
+                savedPlanDisplay.classList.remove('hidden');
+            } else {
+                savedPlanDisplay.classList.add('hidden');
+            }
+        }
+
+        safetyPlanForm.addEventListener('submit', saveSafetyPlan);
+
+        // --- Quiz Functionality ---
+        function startQuiz() {
+            currentQuizIndex = 0;
+            quizResultEl.classList.add('hidden');
+            nextQuizBtn.classList.add('hidden');
+            showQuestion();
+        }
+
+        function showQuestion() {
+            if (currentQuizIndex < quizQuestions.length) {
+                const q = quizQuestions[currentQuizIndex];
+                quizQuestionEl.textContent = q.question;
+                quizOptionsEl.innerHTML = '';
+                q.options.forEach(option => {
+                    const btn = document.createElement('button');
+                    btn.textContent = option;
+                    btn.onclick = () => checkAnswer(option, q.answer);
+                    quizOptionsEl.appendChild(btn);
+                });
+                quizResultEl.classList.add('hidden');
+                nextQuizBtn.classList.add('hidden');
+            } else {
+                endQuiz();
+            }
+        }
+
+        function checkAnswer(selected, correct) {
+            const isCorrect = selected === correct;
+            quizOptionsEl.querySelectorAll('button').forEach(btn => {
+                btn.disabled = true;
+                if (btn.textContent === correct) {
+                    btn.classList.add('correct');
+                } else if (btn.textContent === selected) {
+                    btn.classList.add('incorrect');
+                }
+            });
+            
+            quizResultEl.textContent = isCorrect ? "Correct!" : "Incorrect. The correct answer is: " + correct;
+            quizResultEl.classList.remove('hidden');
+            nextQuizBtn.classList.remove('hidden');
+        }
+
+        nextQuizBtn.addEventListener('click', () => {
+            currentQuizIndex++;
+            showQuestion();
+        });
+
+        function endQuiz() {
+            quizQuestionEl.textContent = "Quiz Complete!";
+            quizOptionsEl.innerHTML = '';
+            quizResultEl.textContent = "You've finished the quiz. Thank you for participating!";
+            quizResultEl.classList.remove('hidden');
+            nextQuizBtn.classList.add('hidden');
+        }
+        
+        // --- General UI Functions ---
+        footerNavBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                showPage(btn.dataset.page);
+            });
+        });
+
+        closeModalBtn.addEventListener('click', () => {
+            journalModal.style.display = 'none';
+        });
+
+        copyBtn.addEventListener('click', () => {
+            const textToCopy = copyBtn.dataset.text;
+            if (textToCopy) {
+                const tempInput = document.createElement("textarea");
+                tempInput.value = textToCopy;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                try {
+                    document.execCommand('copy');
+                    showMessage('Journal entry copied to clipboard!');
+                } catch (err) {
+                    showMessage('Failed to copy text.');
+                }
+                document.body.removeChild(tempInput);
+            }
+        });
+
+        // Initial load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSafetyPlan();
+        });
+    </script>
+</body>
+</html>
